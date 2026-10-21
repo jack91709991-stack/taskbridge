@@ -1,0 +1,919 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TaskBridge - スケジュール作成・作業指示・進捗報告</title>
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Lucide Icons CDN -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <!-- Vue 3 CDN -->
+  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+  <!-- Custom CSS -->
+  <link rel="stylesheet" href="css/style.css">
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#eef2ff',
+              100: '#e0e7ff',
+              500: '#6366f1',
+              600: '#4f46e5',
+              700: '#4338ca',
+            }
+          }
+        }
+      }
+    }
+  </script>
+</head>
+<body class="bg-slate-50 text-slate-800 min-h-screen flex flex-col">
+  <div id="app" v-cloak class="flex flex-col min-h-screen">
+    
+    <!-- トースト通知 -->
+    <div v-if="notification.show" class="fixed top-4 right-4 z-50 flex items-center gap-2 px-4 py-3 rounded-lg shadow-lg text-sm font-medium transition-all duration-300 fade-in"
+         :class="notification.type === 'success' ? 'bg-emerald-600 text-white' : 'bg-indigo-600 text-white'">
+      <i data-lucide="check-circle-2" class="w-4 h-4"></i>
+      <span>{{ notification.message }}</span>
+    </div>
+
+    <!-- ヘッダー -->
+    <header class="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-sm">
+      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div class="flex items-center justify-between h-16">
+          
+          <!-- ロゴとプロジェクト -->
+          <div class="flex items-center gap-3">
+            <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-brand-600 to-indigo-500 flex items-center justify-center text-white shadow-md shadow-brand-500/20">
+              <i data-lucide="layers" class="w-5 h-5"></i>
+            </div>
+            <div>
+              <div class="flex items-center gap-2">
+                <span class="text-lg font-bold tracking-tight text-slate-900">TaskBridge</span>
+                <span class="text-xs px-2 py-0.5 rounded-full bg-brand-50 text-brand-600 font-medium border border-brand-200">MVP</span>
+              </div>
+              <p class="text-xs text-slate-500">{{ activeProject ? activeProject.name : 'スケジュール・指示・報告' }}</p>
+            </div>
+          </div>
+
+          <!-- 週選択 & メンバー切替 & クラウド同期 -->
+          <div class="flex items-center gap-3">
+            
+            <!-- スプレッドシート同期ボタン (連携時のみ) -->
+            <div v-if="gasUrl" class="hidden md:flex items-center gap-1.5 bg-emerald-50 border border-emerald-200 rounded-lg px-2.5 py-1 text-xs">
+              <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+              <span class="text-emerald-800 font-bold text-[11px]">スプレッドシート連携中</span>
+              <button @click="handleFetchFromCloud" :disabled="isSyncing" 
+                      class="ml-1 p-1 hover:bg-emerald-100 rounded text-emerald-700 transition-colors" title="最新データを再読み込み">
+                <i data-lucide="refresh-cw" class="w-3.5 h-3.5" :class="{ 'animate-spin': isSyncing }"></i>
+              </button>
+              <button @click="handleSyncToCloud" :disabled="isSyncing"
+                      class="p-1 hover:bg-emerald-100 rounded text-emerald-700 transition-colors" title="クラウドに一括保存">
+                <i data-lucide="cloud-upload" class="w-3.5 h-3.5"></i>
+              </button>
+            </div>
+
+            <!-- 週選択 -->
+            <div class="flex items-center gap-1.5 bg-slate-100 rounded-lg p-1 text-xs">
+              <i data-lucide="calendar" class="w-3.5 h-3.5 text-slate-500 ml-1.5"></i>
+              <select v-model="currentWeekNumber" @change="triggerRefresh" class="bg-transparent border-none text-slate-700 font-medium focus:ring-0 cursor-pointer pr-4">
+                <option v-for="plan in weeklyPlans" :key="plan.id" :value="plan.weekNumber">
+                  {{ plan.weekLabel }}
+                </option>
+              </select>
+            </div>
+
+            <!-- メンバーセレクター -->
+            <div class="flex items-center gap-2 pl-3 border-l border-slate-200">
+              <span class="text-xs text-slate-500 hidden sm:inline">現在の視点:</span>
+              <div class="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-full px-2.5 py-1">
+                <span class="w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold text-white" :class="currentMember ? currentMember.avatarColor : 'bg-slate-400'">
+                  {{ currentMember ? currentMember.initial : '?' }}
+                </span>
+                <select v-model="currentMemberId" @change="triggerRefresh" class="bg-transparent border-none text-sm font-semibold text-slate-800 focus:ring-0 cursor-pointer pr-4">
+                  <option v-for="m in members" :key="m.id" :value="m.id">
+                    {{ m.name }} ({{ m.role }})
+                  </option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- ナビゲーションタブ -->
+        <div class="flex gap-2 -mb-px border-t border-slate-100 pt-1">
+          <button @click="currentTab = 'home'; triggerRefresh()" 
+                  class="flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors"
+                  :class="currentTab === 'home' ? 'border-brand-600 text-brand-600 font-semibold' : 'border-transparent text-slate-600 hover:text-slate-900'">
+            <i data-lucide="home" class="w-4 h-4"></i>
+            <span>今週の作業指示・報告</span>
+            <span v-if="myWeeklyTasks.length > 0" class="text-xs px-1.5 py-0.2 rounded-full bg-brand-100 text-brand-700 font-bold">
+              {{ myWeeklyTasks.length }}
+            </span>
+          </button>
+
+          <button @click="currentTab = 'weekly_plans'; triggerRefresh()" 
+                  class="flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors"
+                  :class="currentTab === 'weekly_plans' ? 'border-brand-600 text-brand-600 font-semibold' : 'border-transparent text-slate-600 hover:text-slate-900'">
+            <i data-lucide="calendar-check" class="w-4 h-4"></i>
+            <span>週次指示 (作成・配付)</span>
+          </button>
+
+          <button @click="currentTab = 'wbs'; triggerRefresh()" 
+                  class="flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors"
+                  :class="currentTab === 'wbs' ? 'border-brand-600 text-brand-600 font-semibold' : 'border-transparent text-slate-600 hover:text-slate-900'">
+            <i data-lucide="network" class="w-4 h-4"></i>
+            <span>全体WBS・スケジュール</span>
+          </button>
+
+          <button @click="currentTab = 'analytics'; triggerRefresh()" 
+                  class="flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors"
+                  :class="currentTab === 'analytics' ? 'border-brand-600 text-brand-600 font-semibold' : 'border-transparent text-slate-600 hover:text-slate-900'">
+            <i data-lucide="pie-chart" class="w-4 h-4"></i>
+            <span>実績集計・指示外分析</span>
+          </button>
+
+          <button @click="currentTab = 'settings'; triggerRefresh()" 
+                  class="flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ml-auto"
+                  :class="currentTab === 'settings' ? 'border-brand-600 text-brand-600 font-semibold' : 'border-transparent text-slate-600 hover:text-slate-900'">
+            <i data-lucide="database" class="w-4 h-4"></i>
+            <span>データ管理</span>
+          </button>
+        </div>
+
+      </div>
+    </header>
+
+    <!-- メインコンテンツ -->
+    <main class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
+
+      <!-- ============================================== -->
+      <!-- TAB 1: ホーム画面 (メンバー最優先ビュー)          -->
+      <!-- ============================================== -->
+      <section v-if="currentTab === 'home'" class="space-y-6 fade-in">
+        
+        <!-- 稼働サマリーカード -->
+        <div class="bg-white rounded-2xl border border-slate-200/80 shadow-sm p-5">
+          <div class="flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div>
+              <div class="flex items-center gap-2">
+                <span class="w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold text-white" :class="currentMember.avatarColor">
+                  {{ currentMember.initial }}
+                </span>
+                <h1 class="text-xl font-bold text-slate-900">{{ currentMember.name }} さんの作業指示と実績</h1>
+              </div>
+              <p class="text-xs text-slate-500 mt-1">
+                対象週: <span class="font-semibold text-slate-700">{{ currentWeeklyPlan ? currentWeeklyPlan.weekLabel : '' }}</span>
+                <span v-if="currentWeeklyPlan && currentWeeklyPlan.status === 'draft'" class="ml-2 px-2 py-0.5 rounded text-xs bg-amber-50 text-amber-700 border border-amber-200">
+                  ※ 現在は管理者下書き段階です
+                </span>
+              </p>
+            </div>
+
+            <!-- サマリーメトリクス -->
+            <div class="flex items-center gap-3 bg-slate-50 p-2.5 rounded-xl border border-slate-200/60">
+              <div class="text-center px-3 border-r border-slate-200">
+                <div class="text-[11px] text-slate-500 font-medium">予定工数</div>
+                <div class="text-base font-bold text-slate-800">{{ myWeeklySummary.planned }} <span class="text-xs font-normal text-slate-500">h</span></div>
+              </div>
+              <div class="text-center px-3 border-r border-slate-200">
+                <div class="text-[11px] text-slate-500 font-medium">指示内実績</div>
+                <div class="text-base font-bold text-indigo-600">{{ myWeeklySummary.regularActual }} <span class="text-xs font-normal text-slate-500">h</span></div>
+              </div>
+              <div class="text-center px-3 border-r border-slate-200">
+                <div class="text-[11px] text-red-600 font-medium">指示外実績</div>
+                <div class="text-base font-bold text-red-600">{{ myWeeklySummary.unplannedActual }} <span class="text-xs font-normal text-red-400">h</span></div>
+              </div>
+              <div class="text-center px-3">
+                <div class="text-[11px] text-slate-500 font-medium">合計実績</div>
+                <div class="text-lg font-extrabold text-slate-900">{{ myWeeklySummary.totalActual }} <span class="text-xs font-normal text-slate-500">h</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 作業指示リストセクション -->
+        <div class="space-y-4">
+          <div class="flex items-center justify-between">
+            <div class="flex items-center gap-2">
+              <i data-lucide="check-square" class="w-5 h-5 text-brand-600"></i>
+              <h2 class="text-base font-bold text-slate-900">今週の作業指示リスト ({{ myWeeklyTasks.length }}件)</h2>
+            </div>
+            
+            <!-- 指示外作業追加ボタン -->
+            <button @click="openUnplannedModal" 
+                    class="inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-red-50 hover:bg-red-100 text-red-700 text-xs font-semibold rounded-lg border border-red-200 shadow-sm transition-colors">
+              <i data-lucide="alert-circle" class="w-4 h-4 text-red-500"></i>
+              <span>＋ 指示外の作業を追加</span>
+            </button>
+          </div>
+
+          <!-- タスク一覧 -->
+          <div v-if="myWeeklyTasks.length === 0" class="bg-white rounded-xl border border-dashed border-slate-300 p-8 text-center text-slate-500">
+            <i data-lucide="inbox" class="w-10 h-10 mx-auto text-slate-300 mb-2"></i>
+            <p class="text-sm font-medium">今週割り振られた作業指示はありません。</p>
+            <p class="text-xs text-slate-400 mt-1">「週次指示」タブで指示を作成または自動生成してください。</p>
+          </div>
+
+          <div v-else class="space-y-3">
+            <div v-for="item in myWeeklyTasks" :key="item.id" 
+                 class="bg-white rounded-xl border border-slate-200/80 shadow-sm p-4 hover:shadow-md transition-shadow">
+              
+              <div class="flex flex-col lg:flex-row lg:items-center justify-between gap-3 border-b border-slate-100 pb-3">
+                <div class="space-y-1">
+                  <div class="flex items-center gap-2">
+                    <span v-if="item.isAutoGenerated" class="badge-auto text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1">
+                      <i data-lucide="sparkles" class="w-3 h-3"></i> 自動生成
+                    </span>
+                    <span class="text-xs font-semibold px-2 py-0.5 rounded bg-slate-100 text-slate-600">
+                      {{ getWbsTitle(item.wbsId) }}
+                    </span>
+                    <span class="text-xs px-2 py-0.5 rounded font-medium"
+                          :class="item.progress >= 100 ? 'bg-emerald-100 text-emerald-800' : (item.progress > 0 ? 'bg-blue-100 text-blue-800' : 'bg-slate-100 text-slate-600')">
+                      {{ item.progress >= 100 ? '完了' : (item.progress > 0 ? '進行中' : '未着手') }}
+                    </span>
+                  </div>
+                  <h3 class="text-base font-bold text-slate-900">{{ item.title }}</h3>
+                  <p class="text-xs text-slate-500 flex items-start gap-1">
+                    <i data-lucide="message-square" class="w-3.5 h-3.5 text-slate-400 mt-0.5 shrink-0"></i>
+                    <span>指示内容: {{ item.instructions || '特記事項なし' }}</span>
+                  </p>
+                </div>
+
+                <div class="flex items-center gap-4 bg-slate-50 px-3 py-2 rounded-lg self-start lg:self-center">
+                  <div class="text-right">
+                    <div class="text-[10px] text-slate-400">予定工数</div>
+                    <div class="text-sm font-semibold text-slate-700">{{ item.plannedHours }}h</div>
+                  </div>
+                  <div class="text-right">
+                    <div class="text-[10px] text-indigo-500 font-medium">実績入力</div>
+                    <div class="flex items-center gap-1">
+                      <input type="number" step="0.5" min="0" v-model.number="item.actualHours" 
+                             class="w-16 text-sm font-bold text-slate-900 border border-slate-300 rounded px-1.5 py-0.5 text-right focus:ring-1 focus:ring-brand-500">
+                      <span class="text-xs text-slate-500">h</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 進捗率入力と報告メモ欄 -->
+              <div class="pt-3 grid grid-cols-1 md:grid-cols-12 gap-3 items-center">
+                <!-- 進捗スライダー -->
+                <div class="md:col-span-4 space-y-1">
+                  <div class="flex justify-between text-xs">
+                    <span class="text-slate-500 font-medium">進捗率</span>
+                    <span class="font-bold text-brand-600">{{ item.progress }}%</span>
+                  </div>
+                  <input type="range" min="0" max="100" step="5" v-model.number="item.progress" 
+                         class="w-full accent-brand-600 cursor-pointer">
+                </div>
+
+                <!-- 報告メモ -->
+                <div class="md:col-span-6">
+                  <input type="text" v-model="item.reportNotes" placeholder="進捗・完了報告、申し送り事項を入力..." 
+                         class="w-full text-xs text-slate-700 border border-slate-200 rounded-lg px-3 py-1.5 focus:border-brand-500 focus:ring-1 focus:ring-brand-500">
+                </div>
+
+                <!-- 保存ボタン -->
+                <div class="md:col-span-2 text-right">
+                  <button @click="handleUpdateTaskReport(item)" 
+                          class="w-full inline-flex items-center justify-center gap-1.5 px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold rounded-lg shadow-sm transition-colors">
+                    <i data-lucide="save" class="w-3.5 h-3.5"></i>
+                    <span>報告を保存</span>
+                  </button>
+                </div>
+              </div>
+
+            </div>
+          </div>
+        </div>
+
+        <!-- 登録済み指示外作業リスト -->
+        <div v-if="myUnplannedReports.length > 0" class="space-y-3 pt-2">
+          <div class="flex items-center gap-2">
+            <i data-lucide="alert-triangle" class="w-5 h-5 text-red-500"></i>
+            <h2 class="text-base font-bold text-slate-900">あなたが報告した指示外作業 ({{ myUnplannedReports.length }}件)</h2>
+            <span class="text-xs text-slate-500">※ 既存WBSに自動紐付けされ、実績集計に合算されています</span>
+          </div>
+
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div v-for="unp in myUnplannedReports" :key="unp.id" 
+                 class="bg-red-50/40 border border-red-200/80 rounded-xl p-3.5 space-y-2 relative">
+              <div class="flex items-start justify-between gap-2">
+                <div>
+                  <span class="badge-unplanned text-[10px] font-bold px-2 py-0.5 rounded-full inline-block mb-1">
+                    指示外作業 (+{{ unp.hours }}h)
+                  </span>
+                  <h4 class="text-sm font-bold text-slate-900">{{ unp.title }}</h4>
+                </div>
+                <button @click="deleteUnplannedReport(unp.id)" class="text-slate-400 hover:text-red-600 p-1" title="削除">
+                  <i data-lucide="trash-2" class="w-4 h-4"></i>
+                </button>
+              </div>
+
+              <div class="text-xs text-slate-600 bg-white/70 p-2 rounded border border-red-100">
+                <div class="text-slate-400 text-[10px]">発生理由:</div>
+                <div class="font-medium text-slate-700">{{ unp.reason || '理由の記載なし' }}</div>
+              </div>
+
+              <div class="flex items-center justify-between text-[11px] text-slate-500 pt-1">
+                <span class="flex items-center gap-1 font-medium text-slate-700">
+                  <i data-lucide="link-2" class="w-3 h-3 text-red-500"></i>
+                  紐付けWBS: {{ getWbsTitle(unp.linkedWbsId) }}
+                </span>
+                <span>実施日: {{ unp.date }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </section>
+
+      <!-- ============================================== -->
+      <!-- TAB 2: 週次作業指示 (作成・自動生成・配付)         -->
+      <!-- ============================================== -->
+      <section v-if="currentTab === 'weekly_plans'" class="space-y-6 fade-in">
+        
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
+          <div>
+            <div class="flex items-center gap-2">
+              <h2 class="text-xl font-bold text-slate-900">週次作業指示マネージャー</h2>
+              <span v-if="currentWeeklyPlan" class="text-xs px-2.5 py-0.5 rounded-full font-bold uppercase"
+                    :class="currentWeeklyPlan.status === 'published' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'">
+                {{ currentWeeklyPlan.status === 'published' ? '公開済み（配付中）' : '下書き（ドラフト）' }}
+              </span>
+            </div>
+            <p class="text-xs text-slate-500 mt-1">
+              前週の未完了タスクとWBSスケジュールから、週次指示をワンクリックで自動作成し、メンバーへ配付できます。
+            </p>
+          </div>
+
+          <div class="flex items-center gap-2">
+            <!-- 自動生成ボタン -->
+            <button @click="openAutoGenerateModal" 
+                    class="inline-flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-brand-600 to-indigo-600 hover:from-brand-700 hover:to-indigo-700 text-white text-xs font-semibold rounded-xl shadow-md shadow-brand-500/20 transition-all">
+              <i data-lucide="sparkles" class="w-4 h-4"></i>
+              <span>次週の指示を自動生成 (Q3)</span>
+            </button>
+
+            <!-- 公開ボタン -->
+            <button v-if="currentWeeklyPlan && currentWeeklyPlan.status === 'draft'" 
+                    @click="publishWeeklyPlan(currentWeeklyPlan.id)"
+                    class="inline-flex items-center gap-1.5 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-xl shadow-sm transition-colors">
+              <i data-lucide="send" class="w-4 h-4"></i>
+              <span>指示を公開（メンバーへ配付）</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- 選択中週の全メンバー指示一覧 -->
+        <div class="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-sm">
+          <div class="px-5 py-4 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
+            <span class="text-sm font-bold text-slate-800">{{ currentWeeklyPlan ? currentWeeklyPlan.weekLabel : '' }} の指示一覧</span>
+            <span class="text-xs text-slate-500">計 {{ currentWeeklyPlan ? (currentWeeklyPlan.items || []).length : 0 }} 件の作業指示</span>
+          </div>
+
+          <div class="overflow-x-auto">
+            <table class="min-w-full divide-y divide-slate-200 text-left text-xs">
+              <thead class="bg-slate-100/70 text-slate-600 font-semibold">
+                <tr>
+                  <th class="py-3 px-4">担当者</th>
+                  <th class="py-3 px-4">指示タイトル / WBS紐付け</th>
+                  <th class="py-3 px-4">管理者指示メモ</th>
+                  <th class="py-3 px-4 text-right">予定工数</th>
+                  <th class="py-3 px-4 text-right">実績工数</th>
+                  <th class="py-3 px-4 text-center">進捗率</th>
+                  <th class="py-3 px-4">メンバー報告メモ</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-slate-100 text-slate-700">
+                <tr v-for="item in (currentWeeklyPlan ? currentWeeklyPlan.items : [])" :key="item.id" class="hover:bg-slate-50/80 transition-colors">
+                  <td class="py-3 px-4 whitespace-nowrap">
+                    <span class="font-bold text-slate-900">{{ getMemberName(item.memberId) }}</span>
+                  </td>
+                  <td class="py-3 px-4">
+                    <div class="flex items-center gap-1.5">
+                      <span v-if="item.isAutoGenerated" class="badge-auto text-[9px] font-bold px-1.5 py-0.2 rounded">自動</span>
+                      <span class="font-semibold text-slate-900">{{ item.title }}</span>
+                    </div>
+                    <div class="text-[11px] text-slate-400 mt-0.5">{{ getWbsTitle(item.wbsId) }}</div>
+                  </td>
+                  <td class="py-3 px-4 text-slate-600 max-w-xs">
+                    {{ item.instructions || '-' }}
+                  </td>
+                  <td class="py-3 px-4 text-right font-medium">{{ item.plannedHours }}h</td>
+                  <td class="py-3 px-4 text-right font-bold text-indigo-600">{{ item.actualHours }}h</td>
+                  <td class="py-3 px-4 text-center">
+                    <span class="px-2 py-0.5 rounded text-[11px] font-semibold"
+                          :class="item.progress >= 100 ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-100 text-slate-700'">
+                      {{ item.progress }}%
+                    </span>
+                  </td>
+                  <td class="py-3 px-4 text-slate-500 max-w-xs truncate">
+                    {{ item.reportNotes || '未報告' }}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+      </section>
+
+      <!-- ============================================== -->
+      <!-- TAB 3: 全体WBS・スケジュール                     -->
+      <!-- ============================================== -->
+      <section v-if="currentTab === 'wbs'" class="space-y-6 fade-in">
+        
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
+          <div>
+            <div class="flex items-center gap-2">
+              <h2 class="text-xl font-bold text-slate-900">プロジェクト全体スケジュール & WBS</h2>
+              <span class="text-xs px-2.5 py-0.5 rounded-full bg-indigo-50 text-indigo-700 font-bold border border-indigo-200">
+                全体進捗: {{ projectSummary.progressOverall }}%
+              </span>
+            </div>
+            <p class="text-xs text-slate-500 mt-1">
+              工程・機能ごとの階層構造。メンバーからの「指示内報告」＋「指示外作業」がリアルタイムに各WBSへ合算反映されています。
+            </p>
+          </div>
+
+          <div class="flex items-center gap-2">
+            <button @click="openAddWBSModal(null)" 
+                    class="inline-flex items-center gap-1.5 px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold rounded-xl shadow-sm transition-colors">
+              <i data-lucide="plus" class="w-4 h-4"></i>
+              <span>工程 (Phase) の追加</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- WBSツリーテーブル -->
+        <div class="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+          <div class="overflow-x-auto">
+            <table class="min-w-full divide-y divide-slate-200 text-left text-xs">
+              <thead class="bg-slate-100 text-slate-700 font-semibold">
+                <tr>
+                  <th class="py-3.5 px-4">コード / 名称</th>
+                  <th class="py-3.5 px-3">担当</th>
+                  <th class="py-3.5 px-3">期間</th>
+                  <th class="py-3.5 px-3 text-right">予定工数</th>
+                  <th class="py-3.5 px-3 text-right">指示内実績</th>
+                  <th class="py-3.5 px-3 text-right text-red-600">指示外実績</th>
+                  <th class="py-3.5 px-3 text-right font-bold">合計実績</th>
+                  <th class="py-3.5 px-4 text-center">進捗率</th>
+                  <th class="py-3.5 px-3 text-center">操作</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-slate-100">
+                <template v-for="phase in wbsHierarchy.roots" :key="phase.id">
+                  
+                  <!-- 親工程行 -->
+                  <tr class="bg-slate-50 font-bold text-slate-900">
+                    <td class="py-3 px-4 flex items-center gap-2">
+                      <i data-lucide="folder" class="w-4 h-4 text-indigo-500"></i>
+                      <span>{{ phase.code }} {{ phase.title }}</span>
+                    </td>
+                    <td class="py-3 px-3 text-slate-600">{{ phase.assigneeName }}</td>
+                    <td class="py-3 px-3 text-slate-500 font-normal text-[11px]">{{ phase.startDate }} 〜 {{ phase.endDate }}</td>
+                    <td class="py-3 px-3 text-right">{{ phase.plannedHours }}h</td>
+                    <td class="py-3 px-3 text-right text-indigo-700">{{ phase.plannedTaskActualHours }}h</td>
+                    <td class="py-3 px-3 text-right text-red-600">{{ phase.unplannedActualHours > 0 ? phase.unplannedActualHours + 'h' : '-' }}</td>
+                    <td class="py-3 px-3 text-right font-bold text-slate-900">{{ phase.totalActualHours }}h</td>
+                    <td class="py-3 px-4 text-center">
+                      <div class="w-24 bg-slate-200 rounded-full h-2 mx-auto overflow-hidden">
+                        <div class="bg-indigo-600 h-2 rounded-full" :style="{ width: phase.progress + '%' }"></div>
+                      </div>
+                      <span class="text-[10px] text-slate-500">{{ phase.progress }}%</span>
+                    </td>
+                    <td class="py-3 px-3 text-center">
+                      <button @click="openAddWBSModal(phase)" class="text-brand-600 hover:text-brand-800 p-1 font-semibold" title="子タスクを追加">
+                        ＋タスク
+                      </button>
+                    </td>
+                  </tr>
+
+                  <!-- 子タスク行 -->
+                  <tr v-for="child in phase.children" :key="child.id" class="hover:bg-slate-50/60 transition-colors">
+                    <td class="py-2.5 px-4 pl-9 text-slate-800">
+                      <div class="flex items-center gap-2">
+                        <i data-lucide="corner-down-right" class="w-3.5 h-3.5 text-slate-400"></i>
+                        <span class="font-medium">{{ child.code }} {{ child.title }}</span>
+                        <!-- 指示外作業バッジ -->
+                        <span v-if="child.unplannedActualHours > 0" class="badge-unplanned text-[9px] font-bold px-1.5 py-0.2 rounded">
+                          指示外 {{ child.unplannedActualHours }}h 発生
+                        </span>
+                      </div>
+                    </td>
+                    <td class="py-2.5 px-3">
+                      <span class="px-2 py-0.5 rounded text-[11px] font-medium bg-slate-100 text-slate-700">
+                        {{ child.assigneeName }}
+                      </span>
+                    </td>
+                    <td class="py-2.5 px-3 text-slate-400 text-[11px]">{{ child.startDate }} 〜 {{ child.endDate }}</td>
+                    <td class="py-2.5 px-3 text-right text-slate-600">{{ child.plannedHours }}h</td>
+                    <td class="py-2.5 px-3 text-right text-indigo-600">{{ child.plannedTaskActualHours }}h</td>
+                    <td class="py-2.5 px-3 text-right font-medium text-red-600">{{ child.unplannedActualHours > 0 ? child.unplannedActualHours + 'h' : '-' }}</td>
+                    <td class="py-2.5 px-3 text-right font-bold text-slate-900">{{ child.totalActualHours }}h</td>
+                    <td class="py-2.5 px-4 text-center">
+                      <span class="px-2 py-0.5 rounded text-[11px] font-semibold"
+                            :class="child.progress >= 100 ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-100 text-slate-700'">
+                        {{ child.progress }}%
+                      </span>
+                    </td>
+                    <td class="py-2.5 px-3 text-center">
+                      <button @click="deleteWBS(child.id)" class="text-slate-400 hover:text-red-500 p-1" title="削除">
+                        <i data-lucide="trash" class="w-3.5 h-3.5"></i>
+                      </button>
+                    </td>
+                  </tr>
+
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+      </section>
+
+      <!-- ============================================== -->
+      <!-- TAB 4: 実績集計・指示外分析 (Q2要件対応)          -->
+      <!-- ============================================== -->
+      <section v-if="currentTab === 'analytics'" class="space-y-6 fade-in">
+        
+        <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
+          <h2 class="text-xl font-bold text-slate-900">担当毎の実績集計 & 指示外業務分析</h2>
+          <p class="text-xs text-slate-500 mt-1">
+            各メンバーに割り振った指示内工数と、突発的に発生した指示外工数を比較し、業務負荷や予定外要因を可視化します。
+          </p>
+        </div>
+
+        <!-- メンバー別集計カード -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-5">
+          <div v-for="stat in memberAnalytics" :key="stat.member.id" 
+               class="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-4">
+            
+            <div class="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div class="flex items-center gap-2.5">
+                <span class="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold text-white shadow-sm" :class="stat.member.avatarColor">
+                  {{ stat.member.initial }}
+                </span>
+                <div>
+                  <h3 class="font-bold text-slate-900">{{ stat.member.name }}</h3>
+                  <p class="text-[11px] text-slate-400">{{ stat.member.role }}</p>
+                </div>
+              </div>
+              <span class="text-xs font-bold px-2 py-0.5 rounded-full"
+                    :class="stat.unplannedRatio > 25 ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-600'">
+                指示外比率: {{ stat.unplannedRatio }}%
+              </span>
+            </div>
+
+            <!-- 工数メトリクス -->
+            <div class="space-y-2">
+              <div class="flex justify-between text-xs">
+                <span class="text-slate-500">指示内実績工数:</span>
+                <span class="font-bold text-indigo-600">{{ stat.regularActualHours }}h</span>
+              </div>
+              <div class="flex justify-between text-xs">
+                <span class="text-red-500 font-medium">指示外実績工数:</span>
+                <span class="font-bold text-red-600">+{{ stat.unplannedActualHours }}h</span>
+              </div>
+              <div class="pt-2 border-t border-slate-100 flex justify-between text-sm font-extrabold text-slate-900">
+                <span>合計実績稼働:</span>
+                <span>{{ stat.totalActualHours }}h</span>
+              </div>
+
+              <!-- 内訳ビジュアルバー -->
+              <div class="w-full bg-slate-100 rounded-full h-3 overflow-hidden flex mt-2">
+                <div class="bg-indigo-600 h-3" 
+                     :style="{ width: stat.totalActualHours > 0 ? (stat.regularActualHours / stat.totalActualHours * 100) + '%' : '0%' }"
+                     title="指示内工数"></div>
+                <div class="bg-red-500 h-3" 
+                     :style="{ width: stat.totalActualHours > 0 ? (stat.unplannedActualHours / stat.totalActualHours * 100) + '%' : '0%' }"
+                     title="指示外工数"></div>
+              </div>
+              <div class="flex justify-between text-[10px] text-slate-400">
+                <span class="flex items-center gap-1"><span class="w-2 h-2 rounded bg-indigo-600"></span> 指示内</span>
+                <span class="flex items-center gap-1"><span class="w-2 h-2 rounded bg-red-500"></span> 指示外</span>
+              </div>
+            </div>
+
+            <!-- このメンバーの指示外作業リスト -->
+            <div v-if="stat.unplannedReports.length > 0" class="pt-2 border-t border-slate-100 space-y-1.5">
+              <span class="text-[11px] font-semibold text-slate-700 block">指示外の作業内容:</span>
+              <div v-for="unp in stat.unplannedReports" :key="unp.id" class="text-xs bg-red-50/60 p-2 rounded border border-red-100 space-y-0.5">
+                <div class="font-bold text-slate-800 flex justify-between">
+                  <span>{{ unp.title }}</span>
+                  <span class="text-red-600 font-semibold">{{ unp.hours }}h</span>
+                </div>
+                <div class="text-[10px] text-slate-500 truncate">理由: {{ unp.reason }}</div>
+                <div class="text-[10px] text-indigo-600">紐付WBS: {{ getWbsTitle(unp.linkedWbsId) }}</div>
+              </div>
+            </div>
+
+          </div>
+        </div>
+
+      </section>
+
+      <!-- ============================================== -->
+      <!-- TAB 5: 設定・データ管理                         -->
+      <!-- ============================================== -->
+      <section v-if="currentTab === 'settings'" class="space-y-6 fade-in max-w-2xl mx-auto">
+        
+        <!-- Googleスプレッドシート連携（クラウド一元管理） -->
+        <div class="bg-white rounded-2xl border-2 border-emerald-200/80 shadow-sm p-6 space-y-5">
+          <div class="flex items-start justify-between">
+            <div>
+              <div class="flex items-center gap-2">
+                <span class="w-8 h-8 rounded-lg bg-emerald-600 flex items-center justify-center text-white shadow-sm">
+                  <i data-lucide="sheet" class="w-4 h-4"></i>
+                </span>
+                <h2 class="text-lg font-bold text-slate-900">Googleスプレッドシート連携 (一元管理)</h2>
+              </div>
+              <p class="text-xs text-slate-500 mt-1">
+                チームメンバー全員で同じWBSや進捗報告をリアルタイム共有できます。
+              </p>
+            </div>
+            <a href="SPREADSHEET_SETUP_GUIDE.md" target="_blank" class="text-xs text-emerald-700 font-semibold hover:underline flex items-center gap-1">
+              <i data-lucide="help-circle" class="w-3.5 h-3.5"></i>
+              導入ガイドを見る
+            </a>
+          </div>
+
+          <div class="space-y-3 bg-emerald-50/50 p-4 rounded-xl border border-emerald-100">
+            <div>
+              <label class="block text-xs font-bold text-slate-700 mb-1">
+                Google Apps Script ウェブアプリ URL
+              </label>
+              <input type="url" v-model="gasUrl" placeholder="https://script.google.com/macros/s/.../exec"
+                     class="w-full text-xs font-mono border border-slate-300 rounded-lg p-2.5 focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500">
+              <p class="text-[11px] text-slate-500 mt-1">
+                ※ スプレッドシートの「拡張機能」>「Apps Script」からデプロイしたWebアプリURLを入力します。
+              </p>
+            </div>
+
+            <div class="flex flex-wrap items-center gap-2 pt-1">
+              <button @click="handleFetchFromCloud" :disabled="isSyncing"
+                      class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg shadow-sm flex items-center gap-1.5 transition-colors">
+                <i data-lucide="download-cloud" class="w-3.5 h-3.5" :class="{ 'animate-spin': isSyncing }"></i>
+                <span>クラウドから最新データを取得</span>
+              </button>
+
+              <button @click="handleSyncToCloud" :disabled="isSyncing"
+                      class="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold rounded-lg shadow-sm flex items-center gap-1.5 transition-colors">
+                <i data-lucide="upload-cloud" class="w-3.5 h-3.5"></i>
+                <span>現在のデータをスプレッドシートへ保存</span>
+              </button>
+
+              <button @click="handleSaveGasUrl"
+                      class="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-medium rounded-lg">
+                URLのみ保存
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- ローカルバックアップ & 初期化 -->
+        <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 space-y-6">
+          <div>
+            <h2 class="text-base font-bold text-slate-900">ローカルバックアップ & 初期化</h2>
+            <p class="text-xs text-slate-500 mt-0.5">
+              お使いのブラウザ内部（LocalStorage）のデータ管理です。
+            </p>
+          </div>
+
+          <div class="space-y-4">
+            <div class="flex items-center justify-between p-4 bg-slate-50 rounded-xl border border-slate-200">
+              <div>
+                <h4 class="text-sm font-bold text-slate-900">JSONエクスポート</h4>
+                <p class="text-xs text-slate-500">現在の全データ（WBS・指示・報告）をバックアップします。</p>
+              </div>
+              <button @click="exportDataJSON" class="px-4 py-2 bg-slate-900 text-white text-xs font-semibold rounded-lg hover:bg-slate-800">
+                ダウンロード
+              </button>
+            </div>
+
+            <div class="flex items-center justify-between p-4 bg-slate-50 rounded-xl border border-slate-200">
+              <div>
+                <h4 class="text-sm font-bold text-slate-900">JSONインポート</h4>
+                <p class="text-xs text-slate-500">バックアップしたJSONファイルからデータを復元します。</p>
+              </div>
+              <label class="px-4 py-2 bg-indigo-600 text-white text-xs font-semibold rounded-lg hover:bg-indigo-700 cursor-pointer">
+                ファイル選択
+                <input type="file" accept=".json" @change="handleImportJSON" class="hidden">
+              </label>
+            </div>
+
+            <div class="flex items-center justify-between p-4 bg-red-50 rounded-xl border border-red-200">
+              <div>
+                <h4 class="text-sm font-bold text-red-900">サンプルデータへの初期化</h4>
+                <p class="text-xs text-red-600">入力したデータをリセットし、初期デモデータに戻します。</p>
+              </div>
+              <button @click="resetSampleData" class="px-4 py-2 bg-red-600 text-white text-xs font-semibold rounded-lg hover:bg-red-700">
+                初期化実行
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+    </main>
+
+    <!-- ============================================== -->
+    <!-- MODAL 1: 指示外作業追加モーダル (Q2要件対応)      -->
+    <!-- ============================================== -->
+    <div v-if="showUnplannedModal" class="fixed inset-0 z-50 flex items-center justify-center p-4 modal-backdrop fade-in">
+      <div class="bg-white rounded-2xl shadow-xl max-w-lg w-full p-6 space-y-4 border border-slate-200">
+        
+        <div class="flex items-center justify-between border-b border-slate-100 pb-3">
+          <div class="flex items-center gap-2 text-red-600">
+            <i data-lucide="alert-circle" class="w-5 h-5"></i>
+            <h3 class="text-lg font-bold text-slate-900">指示外の作業を報告・追加</h3>
+          </div>
+          <button @click="showUnplannedModal = false" class="text-slate-400 hover:text-slate-600">
+            <i data-lucide="x" class="w-5 h-5"></i>
+          </button>
+        </div>
+
+        <p class="text-xs text-slate-500">
+          現場で突発的に発生した作業を既存のWBSに紐付けて記録します。担当者ごとの実績値集計に正しく反映されます。
+        </p>
+
+        <form @submit.prevent="submitUnplannedReport" class="space-y-3.5">
+          
+          <div>
+            <label class="block text-xs font-bold text-slate-700 mb-1">作業内容 <span class="text-red-500">*</span></label>
+            <input type="text" v-model="unplannedForm.title" required placeholder="例: クライアント緊急要請の仕様調査、本番不具合の調査など"
+                   class="w-full text-xs border border-slate-300 rounded-lg p-2.5 focus:border-brand-500 focus:ring-1 focus:ring-brand-500">
+          </div>
+
+          <div>
+            <label class="block text-xs font-bold text-slate-700 mb-1">紐付ける既存WBS <span class="text-red-500">* (集計先)</span></label>
+            <select v-model="unplannedForm.linkedWbsId" required
+                    class="w-full text-xs border border-slate-300 rounded-lg p-2.5 focus:border-brand-500 focus:ring-1 focus:ring-brand-500">
+              <option v-for="t in wbsSelectableTasks" :key="t.id" :value="t.id">
+                [{{ t.code }}] {{ t.title }} ({{ t.type === 'phase' ? '工程' : 'タスク' }})
+              </option>
+            </select>
+          </div>
+
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-bold text-slate-700 mb-1">実績工数 (時間) <span class="text-red-500">*</span></label>
+              <input type="number" step="0.5" min="0.5" v-model.number="unplannedForm.hours" required
+                     class="w-full text-xs border border-slate-300 rounded-lg p-2.5 focus:border-brand-500 focus:ring-1 focus:ring-brand-500">
+            </div>
+            <div>
+              <label class="block text-xs font-bold text-slate-700 mb-1">作業日</label>
+              <input type="date" v-model="unplannedForm.date" required
+                     class="w-full text-xs border border-slate-300 rounded-lg p-2.5 focus:border-brand-500 focus:ring-1 focus:ring-brand-500">
+            </div>
+          </div>
+
+          <div>
+            <label class="block text-xs font-bold text-slate-700 mb-1">指示外となった理由・要因</label>
+            <textarea v-model="unplannedForm.reason" rows="2" placeholder="例: 定例MTGにて急遽追加を依頼されたため、開発サーバーの障害復旧のため 等"
+                      class="w-full text-xs border border-slate-300 rounded-lg p-2.5 focus:border-brand-500 focus:ring-1 focus:ring-brand-500"></textarea>
+          </div>
+
+          <div>
+            <label class="block text-xs font-bold text-slate-700 mb-1">対応結果メモ / 共有事項</label>
+            <textarea v-model="unplannedForm.notes" rows="2" placeholder="調査結果や対応完了状況など"
+                      class="w-full text-xs border border-slate-300 rounded-lg p-2.5 focus:border-brand-500 focus:ring-1 focus:ring-brand-500"></textarea>
+          </div>
+
+          <div class="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
+            <button type="button" @click="showUnplannedModal = false" class="px-4 py-2 text-xs font-semibold text-slate-600 hover:text-slate-800">
+              キャンセル
+            </button>
+            <button type="submit" class="px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-xs font-bold rounded-lg shadow-sm">
+              指示外作業を登録
+            </button>
+          </div>
+
+        </form>
+
+      </div>
+    </div>
+
+    <!-- ============================================== -->
+    <!-- MODAL 2: 週次指示自動生成モーダル (Q3要件対応)     -->
+    <!-- ============================================== -->
+    <div v-if="showAutoGenerateModal" class="fixed inset-0 z-50 flex items-center justify-center p-4 modal-backdrop fade-in">
+      <div class="bg-white rounded-2xl shadow-xl max-w-md w-full p-6 space-y-4 border border-slate-200">
+        
+        <div class="flex items-center justify-between border-b border-slate-100 pb-3">
+          <div class="flex items-center gap-2 text-brand-600">
+            <i data-lucide="sparkles" class="w-5 h-5"></i>
+            <h3 class="text-lg font-bold text-slate-900">次週の作業指示を自動生成</h3>
+          </div>
+          <button @click="showAutoGenerateModal = false" class="text-slate-400 hover:text-slate-600">
+            <i data-lucide="x" class="w-5 h-5"></i>
+          </button>
+        </div>
+
+        <div class="space-y-2 text-xs text-slate-600 bg-brand-50/60 p-3 rounded-xl border border-brand-100">
+          <p class="font-bold text-brand-900">自動生成の抽出条件:</p>
+          <ul class="list-disc pl-4 space-y-1 text-brand-800">
+            <li>前週の作業指示のうち、未完了（進捗100%未満）のタスクを引き継ぎ</li>
+            <li>WBSの中で進行中または今週開始予定で担当が割り振られているタスクを抽出</li>
+            <li>生成後は管理者が微調整・確認してからメンバーへ配付可能</li>
+          </ul>
+        </div>
+
+        <form @submit.prevent="runAutoGenerateWeeklyPlan" class="space-y-3">
+          <div>
+            <label class="block text-xs font-bold text-slate-700 mb-1">週識別コード</label>
+            <input type="text" v-model="autoGenForm.weekNumber" required placeholder="例: 2026-W43"
+                   class="w-full text-xs border border-slate-300 rounded-lg p-2.5">
+          </div>
+
+          <div>
+            <label class="block text-xs font-bold text-slate-700 mb-1">週表示ラベル</label>
+            <input type="text" v-model="autoGenForm.weekLabel" required placeholder="例: 2026年10月 第4週 (10/26 - 11/01)"
+                   class="w-full text-xs border border-slate-300 rounded-lg p-2.5">
+          </div>
+
+          <div class="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
+            <button type="button" @click="showAutoGenerateModal = false" class="px-4 py-2 text-xs font-semibold text-slate-600">
+              キャンセル
+            </button>
+            <button type="submit" class="px-4 py-2 bg-brand-600 hover:bg-brand-700 text-white text-xs font-bold rounded-lg shadow-sm">
+              自動生成を実行する
+            </button>
+          </div>
+        </form>
+
+      </div>
+    </div>
+
+    <!-- ============================================== -->
+    <!-- MODAL 3: WBS項目追加モーダル                     -->
+    <!-- ============================================== -->
+    <div v-if="showAddWBSModal" class="fixed inset-0 z-50 flex items-center justify-center p-4 modal-backdrop fade-in">
+      <div class="bg-white rounded-2xl shadow-xl max-w-md w-full p-6 space-y-4 border border-slate-200">
+        
+        <div class="flex items-center justify-between border-b border-slate-100 pb-3">
+          <h3 class="text-lg font-bold text-slate-900">WBS項目の追加</h3>
+          <button @click="showAddWBSModal = false" class="text-slate-400 hover:text-slate-600">
+            <i data-lucide="x" class="w-5 h-5"></i>
+          </button>
+        </div>
+
+        <form @submit.prevent="submitAddWBS" class="space-y-3">
+          <div>
+            <label class="block text-xs font-bold text-slate-700 mb-1">コード (例: 3.3)</label>
+            <input type="text" v-model="wbsForm.code" required class="w-full text-xs border border-slate-300 rounded-lg p-2.5">
+          </div>
+
+          <div>
+            <label class="block text-xs font-bold text-slate-700 mb-1">タスク名 / 工程名</label>
+            <input type="text" v-model="wbsForm.title" required class="w-full text-xs border border-slate-300 rounded-lg p-2.5">
+          </div>
+
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-bold text-slate-700 mb-1">担当者</label>
+              <select v-model="wbsForm.assigneeId" class="w-full text-xs border border-slate-300 rounded-lg p-2.5">
+                <option v-for="m in members" :key="m.id" :value="m.id">{{ m.name }}</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs font-bold text-slate-700 mb-1">予定工数 (h)</label>
+              <input type="number" min="1" v-model.number="wbsForm.plannedHours" class="w-full text-xs border border-slate-300 rounded-lg p-2.5">
+            </div>
+          </div>
+
+          <div class="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
+            <button type="button" @click="showAddWBSModal = false" class="px-4 py-2 text-xs font-semibold text-slate-600">
+              キャンセル
+            </button>
+            <button type="submit" class="px-4 py-2 bg-slate-900 text-white text-xs font-bold rounded-lg shadow-sm">
+              追加する
+            </button>
+          </div>
+        </form>
+
+      </div>
+    </div>
+
+    <!-- フッター -->
+    <footer class="bg-white border-t border-slate-200 py-4 mt-auto">
+      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 text-center text-xs text-slate-400">
+        TaskBridge &copy; 2026 - スケジュール作成・作業指示・進捗報告
+      </div>
+    </footer>
+
+  </div>
+
+  <!-- データとスクリプトの読み込み -->
+  <script src="js/sample_data.js"></script>
+  <script src="js/store.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
